@@ -5,9 +5,7 @@ import os
 import numpy as np
 import pickle
 import face_recognition
-import pandas as pd
 from datetime import datetime
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
 
 # Constants
 face_data_file = "face_data.pkl"
@@ -18,6 +16,7 @@ images_dir = "images"
 
 # Ensure output directory exists
 os.makedirs(output_dir, exist_ok=True)
+os.makedirs(images_dir, exist_ok=True)  # Ensure images directory exists
 
 def train_images():
     all_face_encodings = []
@@ -27,8 +26,6 @@ def train_images():
         class_folder = os.path.join(root_folder, class_name)
 
         if os.path.isdir(class_folder):
-            class_face_encodings = []
-
             for filename in os.listdir(class_folder):
                 image_path = os.path.join(class_folder, filename)
                 image = face_recognition.load_image_file(image_path)
@@ -87,41 +84,101 @@ def load_face_data():
             return face_data['encodings'], face_data['names']
     return [], []
 
-class FaceRecognitionTransformer(VideoTransformerBase):
-    def __init__(self):
-        self.all_face_encodings, self.all_face_names = load_face_data()
+# Initialize a global dictionary to track the last log time for each person
+last_logged_times = {}
 
-    def transform(self, frame):
-        image = frame.to_ndarray(format="bgr24")
-        face_locations = face_recognition.face_locations(image, model='cnn')  # Use GPU-accelerated CNN model
-        face_encodings = face_recognition.face_encodings(image, face_locations)
+def log_detections(names, frame):
+    global last_logged_times
+    current_time = datetime.now()
+    log_entries = []
+
+    for name in names:
+        if name not in last_logged_times:
+            # Log the detection and capture image if the person hasn't been logged before
+            log_entries.append((name, current_time.strftime("%Y-%m-%d %H:%M:%S")))
+            last_logged_times[name] = current_time
+
+            # Save captured image with a timestamp
+            image_filename = os.path.join(images_dir, f"{name}_{current_time.strftime('%Y-%m-%d_%H-%M-%S')}.jpeg")
+            cv2.imwrite(image_filename, frame)
+            st.write(f"Captured image for {name}: {image_filename}")
+        else:
+            # Check if the last log for this person was more than 1 minute ago
+            time_diff = (current_time - last_logged_times[name]).total_seconds() / 60.0
+            if time_diff >= 1:  # Only log if more than 1 minute has passed
+                log_entries.append((name, current_time.strftime("%Y-%m-%d %H:%M:%S")))
+                last_logged_times[name] = current_time
+
+                # Save captured image with a timestamp
+                image_filename = os.path.join(images_dir, f"{name}_{current_time.strftime('%Y-%m-%d_%H-%M-%S')}.jpeg")
+                cv2.imwrite(image_filename, frame)
+                st.write(f"Captured image for {name}: {image_filename}")
+
+    # Write the log entries immediately after detection
+    if log_entries:
+        with open(csv_file, 'a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerows(log_entries)
+
+def start_live_face_recognition():
+    st.subheader("Live Face Recognition (via OpenCV)")
+
+    # Load face data
+    all_face_encodings, all_face_names = load_face_data()
+
+    if len(all_face_encodings) == 0:
+        st.warning("No face data found. Please train the model first.")
+        return
+
+    # OpenCV video capture
+    video_capture = cv2.VideoCapture(0)
+    if not video_capture.isOpened():
+        st.error("Error opening webcam.")
+        return
+
+    # Start the live video feed and face recognition
+    while True:
+        ret, frame = video_capture.read()
+        if not ret:
+            st.error("Failed to read frame from webcam.")
+            break
+
+        # Flip the frame (optional)
+        frame = cv2.flip(frame, 1)
+
+        # Detect face locations and encodings
+        face_locations = face_recognition.face_locations(frame, model='cnn')  # Use GPU-accelerated CNN model
+        face_encodings = face_recognition.face_encodings(frame, face_locations)
 
         detected_names = []
 
+        # Iterate through detected faces
         for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
-            matches = face_recognition.compare_faces(self.all_face_encodings, face_encoding, tolerance=0.5)
+            matches = face_recognition.compare_faces(all_face_encodings, face_encoding, tolerance=0.5)
             name = "Unknown"
 
             if True in matches:
                 first_match_index = matches.index(True)
-                name = self.all_face_names[first_match_index]
+                name = all_face_names[first_match_index]
+
+            # Draw rectangle around face and put the name
+            cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+            cv2.putText(frame, name, (left + 6, bottom - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
             detected_names.append(name)
-            cv2.rectangle(image, (left, top), (right, bottom), (0, 255, 0), 2)
-            cv2.putText(image, name, (left + 6, bottom - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
+        # Display the resulting frame
+        cv2.imshow('Live Face Recognition', frame)
+
+        # Log and capture images
         if detected_names:
-            self.log_detections(detected_names)
+            log_detections(detected_names, frame)
 
-        return image
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-    def log_detections(self, names):
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_entries = [(name, timestamp) for name in names]
-
-        with open(csv_file, 'a', newline='') as file:
-            writer = csv.writer(file)
-            writer.writerows(log_entries)
+    video_capture.release()
+    cv2.destroyAllWindows()
 
 def app():
     st.title("Home")
@@ -133,5 +190,5 @@ def app():
         st.success("Training completed successfully.")
 
     # Start Live Face Recognition
-    st.subheader("Live Face Recognition")
-    webrtc_streamer(key="example", mode=WebRtcMode.SENDRECV, video_transformer_factory=FaceRecognitionTransformer)
+    if st.button("Start Live Face Recognition"):
+        start_live_face_recognition()
