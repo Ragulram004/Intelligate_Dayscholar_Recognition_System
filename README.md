@@ -92,6 +92,11 @@ This project is an AI-powered facial recognition system designed to distinguish 
 
 ---
 
+## Contributors
+
+- [kabilanb29](https://github.com/kabilanb29) (KABILAN B)
+- [jawahar63](https://github.com/jawahar63) (JAWAHAR V)
+
 ## 📢 License
 
 For educational and institutional use only.
